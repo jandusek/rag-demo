@@ -300,34 +300,34 @@ def find_similar_items(query_text: str, pool_idx: np.ndarray, k: int = 2) -> pd.
 
     return candidates.sort_values("_score", ascending=False)
 
-def find_matching_items_with_rag(item_descriptions: List[str], pool_idx: np.ndarray, 
-                                reference_image_bytes: Optional[bytes] = None, 
+def find_matching_items_with_rag(item_descriptions: List[str], pool_idx: np.ndarray,
+                                reference_image_bytes: Optional[bytes] = None,
                                 enable_matching: bool = True) -> Tuple[pd.DataFrame, Dict]:
     """Find matching items using RAG approach - runs cosine search per item description."""
     if not item_descriptions:
         return pd.DataFrame(), {}
 
     all_candidates = []
-    
+
     # Process each item description individually (3 items → 6 results total)
     for description in item_descriptions:
         similar_items = find_similar_items(description, pool_idx, k=2)
         if not similar_items.empty:
             all_candidates.append(similar_items)
-    
+
     if not all_candidates:
         return pd.DataFrame(), {}
-    
+
     # Combine all results
     combined_candidates = pd.concat(all_candidates, ignore_index=True)
-    
+
     # Apply visual matching filter if enabled and reference image is provided
     matching_debug_info = {}
     if enable_matching and reference_image_bytes is not None:
         with st.spinner("Checking outfit compatibility..."):
             filtered_candidates, matching_debug_info = filter_recommendations_with_matching(reference_image_bytes, combined_candidates)
             return filtered_candidates, matching_debug_info
-    
+
     return combined_candidates, matching_debug_info
 
 def _recs_with_spinner(titles: List[str], pool_idx: np.ndarray, reference_image_bytes: Optional[bytes] = None, enable_matching: bool = True):
@@ -611,7 +611,7 @@ def render_detail_page(item_id: Optional[str] = None, is_user_upload: bool = Fal
         with c1:
             st.image(up_bytes, caption="User-uploaded image", use_container_width=True)
         with c2:
-            st.subheader("User item analysis")
+            st.subheader("User item")
             if analysis.get("description"):
                 st.write(analysis["description"])
         with st.expander("[debug] Model analysis", expanded=False):
@@ -644,12 +644,15 @@ def render_detail_page(item_id: Optional[str] = None, is_user_upload: bool = Fal
         # Check if we have cached recommendations
         if cache_key in st.session_state:
             recs = st.session_state[cache_key]
+            candidates = st.session_state.get(f"{cache_key}_candidates", pd.DataFrame())
         else:
             # Generate initial recommendations using RAG approach (3 items → 6 results)
             candidates, debug_info = _recs_with_spinner(titles, pool_idx)
             recs = group_topk_by_type(candidates, COL["type"], candidates["_score"].to_numpy() if not candidates.empty else np.array([]), per_type=2)
             # Cache the results
             st.session_state[cache_key] = recs
+            # Cache candidates for debugging
+            st.session_state[f"{cache_key}_candidates"] = candidates
 
         with st.expander("[debug] Recommendations", expanded=False):
             st.write({
@@ -734,6 +737,7 @@ def render_detail_page(item_id: Optional[str] = None, is_user_upload: bool = Fal
         # Check if we have cached recommendations
         if cache_key in st.session_state:
             recs = st.session_state[cache_key]
+            candidates = st.session_state.get(f"{cache_key}_candidates", pd.DataFrame())
         else:
             # Generate initial recommendations using RAG approach (3 items → 6 results)
             candidates, debug_info = _recs_with_spinner(titles, pool_idx)
@@ -781,15 +785,15 @@ def render_detail_page(item_id: Optional[str] = None, is_user_upload: bool = Fal
         # Run the RAG approach with visual matching enabled
         titles = analysis.get("items", [])
         pool_idx = pool.index.values if is_user_upload else pool.index.values
-        
+
         filtered_candidates, filtering_results = find_matching_items_with_rag(
             titles, pool_idx, reference_image_bytes=ref_img_bytes, enable_matching=True
         )
-        
+
         if not filtered_candidates.empty:
             exclude_ids = set() if is_user_upload else {str(item[COL["id"]])} if 'item' in locals() else set()
             current_recs = group_topk_by_type(
-                filtered_candidates, COL["type"], 
+                filtered_candidates, COL["type"],
                 filtered_candidates["_score"].to_numpy(),
                 per_type=2, exclude_ids=exclude_ids
             )
