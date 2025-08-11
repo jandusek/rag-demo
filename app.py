@@ -278,47 +278,62 @@ def group_topk_by_type(candidates: pd.DataFrame, type_col: Optional[str], sim_sc
     return pd.DataFrame(selected_rows)
 
 
-def compute_recommendations_from_titles(title_prompts: List[str], pool_idx: np.ndarray, k: int = 80,
-                                      reference_image_bytes: Optional[bytes] = None, enable_matching: bool = True) -> Tuple[pd.DataFrame, np.ndarray]:
-    """Find similar items based on clothing description titles with optional visual matching."""
-    if not title_prompts:
-        return df.iloc[[]], np.array([])
+def find_similar_items(query_text: str, pool_idx: np.ndarray, k: int = 2) -> pd.DataFrame:
+    """Find k most similar items for a single query text using cosine similarity."""
+    if not query_text:
+        return pd.DataFrame()
 
-    # Generate embeddings for search queries
-    query_embeddings = embed_texts(title_prompts)
-    if query_embeddings.size == 0:
-        return df.iloc[[]], np.array([])
+    # Generate embedding for single query
+    query_embedding = embed_texts([query_text])
+    if query_embedding.size == 0:
+        return pd.DataFrame()
 
     # Find most similar items in the filtered pool
-    local_indices = cosine_topk(query_embeddings, VEC_N[pool_idx], k=k)
+    local_indices = cosine_topk(query_embedding, VEC_N[pool_idx], k=k)
     selected_indices = pool_idx[local_indices]
-    candidates = df.iloc[selected_indices]
+    candidates = df.iloc[selected_indices].copy()
 
     # Calculate similarity scores
-    similarities = (query_embeddings @ VEC_N[selected_indices].T).max(axis=0)
-    candidates = candidates.copy()
+    similarities = (query_embedding @ VEC_N[selected_indices].T).flatten()
     candidates["_score"] = similarities
+    candidates["_query"] = query_text
 
+    return candidates.sort_values("_score", ascending=False)
+
+def find_matching_items_with_rag(item_descriptions: List[str], pool_idx: np.ndarray, 
+                                reference_image_bytes: Optional[bytes] = None, 
+                                enable_matching: bool = True) -> Tuple[pd.DataFrame, Dict]:
+    """Find matching items using RAG approach - runs cosine search per item description."""
+    if not item_descriptions:
+        return pd.DataFrame(), {}
+
+    all_candidates = []
+    
+    # Process each item description individually (3 items → 6 results total)
+    for description in item_descriptions:
+        similar_items = find_similar_items(description, pool_idx, k=2)
+        if not similar_items.empty:
+            all_candidates.append(similar_items)
+    
+    if not all_candidates:
+        return pd.DataFrame(), {}
+    
+    # Combine all results
+    combined_candidates = pd.concat(all_candidates, ignore_index=True)
+    
     # Apply visual matching filter if enabled and reference image is provided
-    matching_debug_info = None
+    matching_debug_info = {}
     if enable_matching and reference_image_bytes is not None:
         with st.spinner("Checking outfit compatibility..."):
-            candidates, matching_debug_info = filter_recommendations_with_matching(reference_image_bytes, candidates)
-            if not candidates.empty:
-                # Map filtered candidates back to original similarities array
-                original_positions = []
-                for idx in candidates.index:
-                    # Find position in selected_indices
-                    pos = list(selected_indices).index(idx)
-                    original_positions.append(pos)
-                similarities = similarities[original_positions]
+            filtered_candidates, matching_debug_info = filter_recommendations_with_matching(reference_image_bytes, combined_candidates)
+            return filtered_candidates, matching_debug_info
+    
+    return combined_candidates, matching_debug_info
 
-    return candidates.sort_values("_score", ascending=False), similarities
-
-def _recs_with_spinner(titles: List[str], pool_idx: np.ndarray, k: int = 80, reference_image_bytes: Optional[bytes] = None, enable_matching: bool = True):
-    """Compute recommendations with loading indicator and optional visual matching."""
+def _recs_with_spinner(titles: List[str], pool_idx: np.ndarray, reference_image_bytes: Optional[bytes] = None, enable_matching: bool = True):
+    """Compute recommendations with loading indicator using RAG approach."""
     with st.spinner("Finding complementary items…"):
-        return compute_recommendations_from_titles(titles, pool_idx, k=k, reference_image_bytes=reference_image_bytes, enable_matching=enable_matching)
+        return find_matching_items_with_rag(titles, pool_idx, reference_image_bytes=reference_image_bytes, enable_matching=enable_matching)
 
 def analyze_image_with_gpt(image_bytes: bytes, subcategories: List[str]) -> Dict:
     """Analyze clothing image and generate complementary item recommendations."""
@@ -452,7 +467,7 @@ def check_single_match(reference_image_b64: str, candidate_item: pd.Series) -> T
         candidate_img_b64 = base64.b64encode(candidate_img_bytes).decode("utf-8")
 
         # Check match using GPT (with small delay to avoid rate limits)
-        time.sleep(0.1)
+        time.sleep(0.3)
         match_result = check_match(reference_image_b64, candidate_img_b64)
         is_match = match_result.get("answer", "no").lower() == "yes"
         reason = match_result.get("reason", "Unknown")
@@ -630,9 +645,9 @@ def render_detail_page(item_id: Optional[str] = None, is_user_upload: bool = Fal
         if cache_key in st.session_state:
             recs = st.session_state[cache_key]
         else:
-            # Generate initial recommendations (no visual matching for speed)
-            candidates, sims = _recs_with_spinner(titles, pool_idx, k=80)
-            recs = group_topk_by_type(candidates, COL["type"], candidates["_score"].to_numpy(), per_type=2)
+            # Generate initial recommendations using RAG approach (3 items → 6 results)
+            candidates, debug_info = _recs_with_spinner(titles, pool_idx)
+            recs = group_topk_by_type(candidates, COL["type"], candidates["_score"].to_numpy() if not candidates.empty else np.array([]), per_type=2)
             # Cache the results
             st.session_state[cache_key] = recs
 
@@ -645,6 +660,8 @@ def render_detail_page(item_id: Optional[str] = None, is_user_upload: bool = Fal
             })
             if not candidates.empty:
                 debug_cols = [COL["id"], COL["title"], COL["gender"], COL["type"], "_score"]
+                if "_query" in candidates.columns:
+                    debug_cols.append("_query")
                 if "_match_reason" in candidates.columns:
                     debug_cols.append("_match_reason")
                 preview = candidates[debug_cols].head(20)
@@ -721,10 +738,10 @@ def render_detail_page(item_id: Optional[str] = None, is_user_upload: bool = Fal
         if cache_key in st.session_state:
             recs = st.session_state[cache_key]
         else:
-            # Generate initial recommendations (no visual matching for speed)
-            candidates, sims = _recs_with_spinner(titles, pool_idx, k=80)
+            # Generate initial recommendations using RAG approach (3 items → 6 results)
+            candidates, debug_info = _recs_with_spinner(titles, pool_idx)
             recs = group_topk_by_type(
-                candidates, COL["type"], candidates["_score"].to_numpy(),
+                candidates, COL["type"], candidates["_score"].to_numpy() if not candidates.empty else np.array([]),
                 per_type=2, exclude_ids=exclude_ids
             )
             # Cache the results
@@ -741,6 +758,8 @@ def render_detail_page(item_id: Optional[str] = None, is_user_upload: bool = Fal
             })
             if not candidates.empty:
                 debug_cols = [COL["id"], COL["title"], COL["gender"], COL["type"], "_score"]
+                if "_query" in candidates.columns:
+                    debug_cols.append("_query")
                 if "_match_reason" in candidates.columns:
                     debug_cols.append("_match_reason")
                 preview = candidates[debug_cols].head(20)
@@ -765,15 +784,24 @@ def render_detail_page(item_id: Optional[str] = None, is_user_upload: bool = Fal
     # Visual filtering button
     ref_img_bytes = up_bytes if is_user_upload else reference_img_bytes
     if ref_img_bytes and st.button("🔍 Advanced AI Stylist Filter"):
-        with st.spinner("Looking for that perfect look..."):
-            # Batch process all items in parallel
-            filtered_recs, filtering_results = filter_recommendations_with_matching(ref_img_bytes, recs)
-            current_recs = filtered_recs if not filtered_recs.empty else recs
-
-            if filtered_recs.empty:
-                st.warning("❌ No items passed visual compatibility check. Showing all recommendations.")
-            else:
-                st.success(f"✅ {len(filtered_recs)}/{len(recs)} items hand-picked by your personal AI stylist.")
+        # Run the RAG approach with visual matching enabled
+        titles = analysis.get("items", [])
+        pool_idx = pool.index.values if is_user_upload else pool.index.values
+        
+        filtered_candidates, filtering_results = find_matching_items_with_rag(
+            titles, pool_idx, reference_image_bytes=ref_img_bytes, enable_matching=True
+        )
+        
+        if not filtered_candidates.empty:
+            exclude_ids = set() if is_user_upload else {str(item[COL["id"]])} if 'item' in locals() else set()
+            current_recs = group_topk_by_type(
+                filtered_candidates, COL["type"], 
+                filtered_candidates["_score"].to_numpy(),
+                per_type=2, exclude_ids=exclude_ids
+            )
+            st.success(f"✅ {len(current_recs)} items hand-picked by your personal AI stylist using RAG approach.")
+        else:
+            st.warning("❌ No items passed visual compatibility check. Showing all recommendations.")
 
     # Render recommendations
     recommendation_cols = st.columns(6)
