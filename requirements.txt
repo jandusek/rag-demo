@@ -1,0 +1,6 @@
+streamlit>=1.36
+pandas>=2.2
+numpy>=1.26
+pillow>=10.3
+openai>=1.40
+
