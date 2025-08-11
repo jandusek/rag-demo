@@ -666,11 +666,8 @@ def render_detail_page(item_id: Optional[str] = None, is_user_upload: bool = Fal
                     debug_cols.append("_match_reason")
                 preview = candidates[debug_cols].head(20)
                 st.dataframe(preview, use_container_width=True)
-            if not recs.empty and COL["type"]:
-                counts = recs[COL["type"]].astype(str).str.strip().str.lower().value_counts()
-                st.write("per-type counts (after cap):", counts.to_dict())
-                if "_match_reason" in recs.columns:
-                    st.write("Visual matching applied - showing only compatible items")
+            if not recs.empty and "_match_reason" in recs.columns:
+                st.write("Visual matching applied - showing only compatible items")
 
 
     else:
@@ -764,11 +761,8 @@ def render_detail_page(item_id: Optional[str] = None, is_user_upload: bool = Fal
                     debug_cols.append("_match_reason")
                 preview = candidates[debug_cols].head(20)
                 st.dataframe(preview, use_container_width=True)
-            if not recs.empty and COL["type"]:
-                counts = recs[COL["type"]].astype(str).str.strip().str.lower().value_counts()
-                st.write("per-type counts (after cap):", counts.to_dict())
-                if "_match_reason" in recs.columns:
-                    st.write("Visual matching applied - showing only compatible items")
+            if not recs.empty and "_match_reason" in recs.columns:
+                st.write("Visual matching applied - showing only compatible items")
 
 
     # Display recommendations
